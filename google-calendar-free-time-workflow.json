@@ -1,0 +1,152 @@
+{
+  "name": "My workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "sendTo": "= {{ $json.emailAddress }}",
+        "subject": "=📅 {{ $json.period }}の空き時間",
+        "message": "={{ $json.message }}",
+        "options": {}
+      },
+      "id": "8a18ce42-d26f-4a93-907f-28b029477b9d",
+      "name": "Gmail送信",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1136,
+        -288
+      ],
+      "webhookId": "0e4f5f98-e1f9-4286-a457-f0b9493ecbfa",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "5DVMNBWN9E1aKEbX",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// フォームから受け取った期間情報\nconst startDateStr = $('期間指定フォーム').first().json['開始日'];\nconst endDateStr = $('期間指定フォーム').first().json['終了日'];\nconst emailAddress = $('期間指定フォーム').first().json['送信先メールアドレス'];\n\n// 日付をDateTimeオブジェクトに変換（JST）\nconst startDate = DateTime.fromISO(startDateStr).setZone('Asia/Tokyo').startOf('day');\nconst endDate = DateTime.fromISO(endDateStr).setZone('Asia/Tokyo').endOf('day');\n\n// 期間の表示形式を作成\nlet periodDisplay;\nif (startDate.hasSame(endDate, 'day')) {\n  periodDisplay = startDate.toFormat('yyyy年MM月dd日');\n} else if (startDate.hasSame(endDate, 'month')) {\n  periodDisplay = `${startDate.toFormat('yyyy年MM月dd日')}〜${endDate.toFormat('dd日')}`;\n} else if (startDate.hasSame(endDate, 'year')) {\n  periodDisplay = `${startDate.toFormat('yyyy年MM月dd日')}〜${endDate.toFormat('MM月dd日')}`;\n} else {\n  periodDisplay = `${startDate.toFormat('yyyy年MM月dd日')}〜${endDate.toFormat('yyyy年MM月dd日')}`;\n}\n\n// イベントデータを取得\nconst events = $input.all();\n\n// 営業時間の設定（9:00-18:00）\nconst BUSINESS_START_HOUR = 9;\nconst BUSINESS_END_HOUR = 18;\n\n// デバッグ情報\nconsole.log(`取得したイベント数: ${events.length}`);\nconsole.log(`処理期間: ${startDate.toFormat('yyyy-MM-dd')} 〜 ${endDate.toFormat('yyyy-MM-dd')}`);\n\n// 日付別の空き時間を格納するオブジェクト\nconst freeTimesByDate = {};\n\n// 処理する日付の範囲を日単位でループ\nlet currentDate = startDate.startOf('day');\nwhile (currentDate <= endDate.startOf('day')) {\n  const dateKey = currentDate.toFormat('yyyy-MM-dd');\n  const dateDisplay = currentDate.toFormat('MM月dd日（ccc）', {locale: 'ja'});\n  \n  // 平日のみ処理（土日を除外）\n  // 注意: luxonのweekdayは1（月）から7（日）\n  if (currentDate.weekday >= 1 && currentDate.weekday <= 5) {\n    console.log(`処理中の日付: ${dateKey} (${dateDisplay})`);\n    \n    // その日の予定を取得\n    const dayEvents = events.filter(item => {\n      const event = item.json;\n      if (!event.start) return false;\n      \n      const eventStart = event.start.dateTime ? \n        DateTime.fromISO(event.start.dateTime).setZone('Asia/Tokyo') : \n        DateTime.fromISO(event.start.date).setZone('Asia/Tokyo');\n      \n      return eventStart.toFormat('yyyy-MM-dd') === dateKey;\n    });\n    \n    console.log(`${dateKey}の予定数: ${dayEvents.length}`);\n    \n    // 予定を時刻順にソート\n    const sortedEvents = dayEvents.map(item => {\n      const event = item.json;\n      const start = event.start.dateTime ? \n        DateTime.fromISO(event.start.dateTime).setZone('Asia/Tokyo') : \n        null;\n      const end = event.end?.dateTime ? \n        DateTime.fromISO(event.end.dateTime).setZone('Asia/Tokyo') : \n        null;\n      \n      return {\n        start: start,\n        end: end,\n        isAllDay: !event.start.dateTime,\n        summary: event.summary || '(タイトルなし)'\n      };\n    }).filter(e => !e.isAllDay && e.start && e.end)\n      .sort((a, b) => a.start - b.start);\n    \n    console.log(`${dateKey}の時間指定予定数: ${sortedEvents.length}`);\n    \n    // 空き時間を計算\n    const freeSlots = [];\n    const dayStart = currentDate.set({ hour: BUSINESS_START_HOUR, minute: 0, second: 0, millisecond: 0 });\n    const dayEnd = currentDate.set({ hour: BUSINESS_END_HOUR, minute: 0, second: 0, millisecond: 0 });\n    \n    // 予定がない場合は終日空きとして処理\n    if (sortedEvents.length === 0) {\n      freeSlots.push({\n        start: dayStart,\n        end: dayEnd,\n        duration: dayEnd.diff(dayStart, 'minutes').minutes\n      });\n    } else {\n      let lastEndTime = dayStart;\n      \n      sortedEvents.forEach((event, index) => {\n        // イベントの開始・終了時刻が営業時間内に収まるよう調整\n        const eventStart = event.start < dayStart ? dayStart : event.start;\n        const eventEnd = event.end > dayEnd ? dayEnd : event.end;\n        \n        // 前の予定の終了時刻から次の予定の開始時刻までが空き時間\n        if (eventStart > lastEndTime && lastEndTime < dayEnd) {\n          const freeEnd = eventStart < dayEnd ? eventStart : dayEnd;\n          \n          if (freeEnd > lastEndTime) {\n            const duration = freeEnd.diff(lastEndTime, 'minutes').minutes;\n            freeSlots.push({\n              start: lastEndTime,\n              end: freeEnd,\n              duration: duration\n            });\n          }\n        }\n        \n        // 次の空き時間計算のため、終了時刻を更新\n        if (eventEnd > lastEndTime) {\n          lastEndTime = eventEnd;\n        }\n      });\n      \n      // 最後の予定から営業終了時刻までの空き時間\n      if (lastEndTime < dayEnd) {\n        const duration = dayEnd.diff(lastEndTime, 'minutes').minutes;\n        freeSlots.push({\n          start: lastEndTime,\n          end: dayEnd,\n          duration: duration\n        });\n      }\n    }\n    \n    console.log(`${dateKey}の空き時間スロット数: ${freeSlots.length}`);\n    \n    // 30分以上の空き時間のみを記録\n    const significantFreeSlots = freeSlots.filter(slot => slot.duration >= 30);\n    \n    console.log(`${dateKey}の30分以上の空き時間数: ${significantFreeSlots.length}`);\n    \n    if (significantFreeSlots.length > 0) {\n      freeTimesByDate[dateKey] = {\n        display: dateDisplay,\n        slots: significantFreeSlots\n      };\n    }\n  }\n  \n  currentDate = currentDate.plus({ days: 1 });\n}\n\n// HTML形式のメッセージを作成\nlet message = `<h2>📅 ${periodDisplay}の空き時間</h2>\\n`;\nmessage += `<p><strong>営業時間: ${BUSINESS_START_HOUR}:00〜${BUSINESS_END_HOUR}:00（平日のみ）</strong></p>\\n`;\nmessage += `<p>30分以上の空き時間を表示しています。</p>\\n`;\n\nconst dateKeys = Object.keys(freeTimesByDate).sort();\n\nif (dateKeys.length === 0) {\n  message += '<p style=\"color: #d9534f;\">⚠️ この期間に30分以上の空き時間はありません。</p>';\n  message += `<p style=\"font-size: 0.9em; color: #666;\">デバッグ情報：<br>`;\n  message += `- 取得したイベント総数: ${events.length}<br>`;\n  message += `- 処理期間: ${startDate.toFormat('yyyy-MM-dd')} 〜 ${endDate.toFormat('yyyy-MM-dd')}</p>`;\n} else {\n  let totalFreeMinutes = 0;\n  \n  dateKeys.forEach(dateKey => {\n    const dateData = freeTimesByDate[dateKey];\n    message += `\\n<h3>▶️ ${dateData.display}</h3>\\n`;\n    message += '<ul>\\n';\n    \n    dateData.slots.forEach(slot => {\n      const startTime = slot.start.toFormat('HH:mm');\n      const endTime = slot.end.toFormat('HH:mm');\n      const hours = Math.floor(slot.duration / 60);\n      const minutes = slot.duration % 60;\n      const durationStr = hours > 0 ? \n        `${hours}時間${minutes > 0 ? minutes + '分' : ''}` : \n        `${minutes}分`;\n      \n      message += `<li>🕐 ${startTime}〜${endTime} （${durationStr}）</li>\\n`;\n      totalFreeMinutes += slot.duration;\n    });\n    \n    message += '</ul>\\n';\n  });\n  \n  // 合計空き時間を表示\n  const totalHours = Math.floor(totalFreeMinutes / 60);\n  const totalMinutesRemainder = totalFreeMinutes % 60;\n  const totalTimeStr = totalHours > 0 ? \n    `${totalHours}時間${totalMinutesRemainder > 0 ? totalMinutesRemainder + '分' : ''}` : \n    `${totalMinutesRemainder}分`;\n  \n  message += `\\n<hr>\\n<p><strong>合計空き時間: ${totalTimeStr}</strong></p>`;\n}\n\n// フッターを追加\nmessage += `\\n<hr>\\n<p style=\"color: #666; font-size: 0.9em;\">このメールは自動送信されました。</p>`;\n\nreturn [{\n  json: {\n    message: message,\n    period: periodDisplay,\n    emailAddress: emailAddress\n  }\n}];"
+      },
+      "id": "fe4c31d1-6947-4438-b924-50983ad99e2b",
+      "name": "空き時間計算",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        -288
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "calendar": {
+          "__rl": true,
+          "value": "primary",
+          "mode": "list"
+        },
+        "limit": 100,
+        "timeMin": "={{ $json['開始日'] + 'T00:00:00+09:00' }}",
+        "timeMax": "={{ $json['終了日'] + 'T23:59:59+09:00' }}",
+        "options": {
+          "orderBy": "startTime"
+        }
+      },
+      "id": "55ea6c2c-8a67-4ae5-9e9c-66c9d00898c9",
+      "name": "Google Calendar",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        688,
+        -288
+      ],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "dfrHQ7fbo6b381gv",
+          "name": "Google Calendar account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "formTitle": "Googleカレンダー空き時間取得",
+        "formDescription": "空き時間を確認したい期間を指定してください",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "開始日",
+              "fieldType": "date",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "終了日",
+              "fieldType": "date",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "送信先メールアドレス",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "832b67a9-3c80-4536-ab33-04184b5107a5",
+      "name": "期間指定フォーム",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        464,
+        -288
+      ],
+      "webhookId": "calendar-period"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "空き時間計算": {
+      "main": [
+        [
+          {
+            "node": "Gmail送信",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Calendar": {
+      "main": [
+        [
+          {
+            "node": "空き時間計算",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "期間指定フォーム": {
+      "main": [
+        [
+          {
+            "node": "Google Calendar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "334a238c-ee4d-4f5b-a8b1-071b67ec4af0",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "1346ddaa196aa777fe6cfb2db80056779156946d5d1b6e48c4fb0b24fe34a70d"
+  },
+  "id": "rWnH9yF0LY56wLnu",
+  "tags": []
+}
